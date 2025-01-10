@@ -1,1 +1,1 @@
-# This repository contains all necessary code to replicate the data presented in Lane Yutzy's dissertation chapter titled "EVALUATING PREDICTED PROTEIN STRUCTURES IN DOCKING SIMULATION AS A HIGH-THROUGHPUT SCREENING METHOD FOR DIRECTED EVOLUTION PROBLEMS".
+This repository contains all code used to generate data presented in Lane Yutzy's dissertation chapter titled "EVALUATING PREDICTED PROTEIN STRUCTURES IN DOCKING SIMULATION AS A HIGH-THROUGHPUT SCREENING METHOD FOR DIRECTED EVOLUTION PROBLEMS".
