@@ -1,3 +1,12 @@
+"""
+Pipeline that takes a list of protein sequences as input, runs the sequence through ESMFold(V. 1) for structure prediction, 
+then funnels the highest confidence structure to LightDock (V. 0.9.4) for protein-protein docking simulation.
+
+ProteinProcessor class scripts were modified from: https://huggingface.co/docs/transformers/en/model_doc/esm
+Pipeline created by both Joshua C. Jones and Lane D. Yutzy. 
+"""
+
+# Import dependencies
 import argparse
 import subprocess
 import shutil
@@ -16,21 +25,24 @@ import uuid
 import glob
 from datetime import datetime
 
-
+# Generate logging information
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Define class for sequence to ESMFold pipeline components
 class ProteinProcessor:
     def __init__(self, model, tokenizer):
         self.model = model
         self.tokenizer = tokenizer
 
+    # Define function to tokenize the input sequence list
     def predict_structure(self, sequence: str) -> Dict:
         if sequence.startswith('\ufeff'):
             sequence = sequence.lstrip('\ufeff')
         inputs = self.tokenizer([sequence], return_tensors="pt", add_special_tokens=False)
         return self.model(**inputs)
 
+    # Define function to convert ESMFold output to standard PDB file
     @staticmethod
     def convert_esm_to_pdb(outputs: Dict) -> Optional[str]:
         try:
@@ -49,11 +61,15 @@ class ProteinProcessor:
             logger.error(f"Error converting ESM output to PDB: {e}")
             return None
 
+# Define class to organize files throughout pipeline processing
 class FileManager:
+    
+    # Define function to identify .csv file types and return them as a list
     @staticmethod
     def get_csv_files(directory: Path) -> List[Path]:
         return list(directory.glob('*.csv'))
 
+    # Define function to read input sequences from .csv file
     @staticmethod
     def read_sequences_from_csv(csv_file: Path) -> List[str]:
         try:
@@ -63,24 +79,29 @@ class FileManager:
             logger.error(f"Error reading CSV file {csv_file}: {e}")
             return []
 
+    # Define function to save PDB files 
     @staticmethod
     def save_pdb_structure(pdb_structure: str, output_dir: Path, filename: str):
         pdb_file = output_dir / filename
         pdb_file.write_text(pdb_structure)
         logger.info(f"Saved PDB structure to {pdb_file}")
 
+    # Define function to create output directory to store pipeline files
     @staticmethod
     def create_structure_folder(output_dir: Path, folder_name: str) -> Path:
         folder = output_dir / folder_name
         folder.mkdir(parents=True, exist_ok=True)
         return folder
     
+    # Define function to copy input directory and contents
+    # Necessary to preserve input directory when working across multiple nodes
     @staticmethod
     def copy_input_dir(input_dir: Path, structure_folder: Path, folder_name: str) -> Path:
         folder = structure_folder / folder_name
         shutil.copytree(input_dir, folder)
         return folder
 
+    # Define function to delete LightDock generated versions of input files after simulation is complete
     @staticmethod
     def remove_lightdock_files(input_dir: Path, reference_pdb: str):
         files_to_remove = [
@@ -101,11 +122,12 @@ class FileManager:
                 shutil.rmtree(file)
             logger.info(f"Removed additional lightdock file/directory: {file}")
 
-
+# Define class to initialize pipeline commands
 class CommandRunner:
     def __init__(self, config: Dict):
         self.config = config
 
+    # Define function to run LightDock setup commands based on yaml config parameters
     def run_command(self, command: str):
         logger.info(f"Executing command: {command}")
         try:
@@ -129,6 +151,7 @@ class CommandRunner:
                 logger.info(f"Filtered swarm ranks output:\n{e.stdout}\n{e.stderr}")
             raise
 
+    # Define function to identify the final LightDock simluation stage for each sequence and provide the output to the final command function
     def run_commands_on_swarm_files(self, root_dir: str, folder_pattern: str, file_pattern: str, input_dir: str, output_dir: str, pdb_file: str):
         commands = self.config['swarm_commands']
         for folder in os.listdir(root_dir):
@@ -151,6 +174,7 @@ class CommandRunner:
             os.chdir(folder_path)    
             self._execute_commands(commands, folder_path, largest_file, input_dir, output_dir, current_structure_index, pdb_file)
     
+    # Define function to run LightDock swarm aggregation commands
     def _execute_commands(self, commands: List[str], folder_path: str, largest_file: str, input_dir: str, output_dir: str, current_structure_index: str, pdb_file: str):
         for command in commands:
             formatted_command = command.format(
@@ -165,6 +189,7 @@ class CommandRunner:
             self.run_command(formatted_command)
             logger.info(f"Command executed successfully: {formatted_command}")
 
+# Define class for the core pipeline stages
 class ProteinDockingPipeline:
     def __init__(self, config: Dict, input_seq_index: int, input_seq: str, ):
         self.input_dir = Path(config['paths']['input_dir'])
@@ -177,6 +202,7 @@ class ProteinDockingPipeline:
         self.input_seq = input_seq
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
 
+    # Define function to initialize ESMFold model
     def initialize_model(self):
         model = EsmForProteinFolding.from_pretrained(
             self.config['model']['name'], 
@@ -188,6 +214,7 @@ class ProteinDockingPipeline:
         )
         self.protein_processor = ProteinProcessor(model, tokenizer)
 
+    # Define function for full pipeline
     def process_input_file(self):
         structure_folder = self.file_manager.create_structure_folder(
             self.output_dir, 
@@ -205,24 +232,12 @@ class ProteinDockingPipeline:
         self.run_lightdock_commands(structure_folder)
         self.delete_unnecessary_files(structure_folder)
 
+    # Define function to predict protein structures using ESMFold and convert output to PDB file
     def _generate_pdb_structure(self, sequence: str):
         raw_structure = self.protein_processor.predict_structure(sequence)
         return self.protein_processor.convert_esm_to_pdb(raw_structure)
 
-    def generate_ranked_swarm_list(self, structure_folder: Path):
-        os.chdir(structure_folder)
-        command = self.config['output_file_commands'][0]
-        self.command_runner.run_command(command)
-
-    def threshold_ranked_swarm_list(self, structure_folder: Path):
-        os.chdir(structure_folder)
-        command = self.config['output_file_commands'][1]
-        formatted_command = command.format(
-                input_dir=self.input_dir,
-                structure_folder=structure_folder
-            )
-        self.command_runner.run_command(formatted_command)
-
+    # Define function that runs the LightDock portion of the pipeline
     def run_lightdock_commands(self, structure_folder: Path):
         pdb_files = list(structure_folder.glob('current_structure*.pdb'))
         pdb_file = pdb_files[0]
@@ -253,6 +268,25 @@ class ProteinDockingPipeline:
         self.generate_ranked_swarm_list(structure_folder)
         self.threshold_ranked_swarm_list(structure_folder)
 
+    # Define function to create a list of LightDock swarms ranked by energy value for each input sequence
+    def generate_ranked_swarm_list(self, structure_folder: Path):
+        os.chdir(structure_folder)
+        command = self.config['output_file_commands'][0]
+        self.command_runner.run_command(command)
+
+    # Define function to remove LightDock swarms from the ranked list that do not exceed a given threshold value
+    def threshold_ranked_swarm_list(self, structure_folder: Path):
+        os.chdir(structure_folder)
+        command = self.config['output_file_commands'][1]
+        formatted_command = command.format(
+                input_dir=self.input_dir,
+                structure_folder=structure_folder
+            )
+        self.command_runner.run_command(formatted_command)
+
+    # Define function to identify and remove unwanted output files from LightDock output
+    # This significantly reduces storage requirements for the results of each docking simluation
+    # Simulation files are only stored during the simulation, after which only output data is retained
     def delete_unnecessary_files(self, structure_folder: Path):
         shutil.rmtree(fr'{structure_folder}/init')
         shutil.rmtree(fr'{self.input_dir}')
@@ -267,11 +301,13 @@ class ProteinDockingPipeline:
             os.remove(file)
         for file in filter_structures_list:
             os.remove(file)
-        
+
+# Define function to load config file information        
 def load_config(config_path: str) -> Dict:
     with open(config_path, 'r') as config_file:
         return yaml.safe_load(config_file)
 
+# Define function to parse arguments
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Process protein sequences and PDB files")
     parser.add_argument("config", type=str, help="Path to the configuration file")
@@ -279,6 +315,7 @@ def parse_arguments():
     parser.add_argument("input_seq", type=str, help="Input sequence for ligand protein")
     return parser.parse_args()
 
+# Define main
 def main():
     args = parse_arguments()
     config = load_config(args.config)
@@ -290,5 +327,6 @@ def main():
     pipeline.initialize_model()
     pipeline.process_input_file()
 
+#Execute if run as a script.
 if __name__ == "__main__":
     main()
